@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>3D Tiles + Roads</title>
+  <title>3D Tiles + Roads (Vercel)</title>
 
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.127/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.127/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
@@ -11,69 +11,108 @@
     html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
     #ui {
       position: absolute; top: 12px; left: 12px; z-index: 10;
-      background: rgba(0,0,0,0.65); color: white; padding: 10px; border-radius: 8px;
+      background: rgba(0,0,0,0.70); color: white; padding: 10px; border-radius: 10px;
       font-family: system-ui, sans-serif; width: 360px;
     }
-    input, button { width: 100%; padding: 8px; margin-top: 8px; border-radius: 6px; border: 0; }
+    input, button { width: 100%; padding: 10px; margin-top: 8px; border-radius: 8px; border: 0; }
     button { cursor: pointer; }
-    #status { margin-top: 8px; font-size: 12px; opacity: 0.9; white-space: pre-wrap; }
+    #status { margin-top: 8px; font-size: 12px; opacity: 0.95; white-space: pre-wrap; }
   </style>
 </head>
 <body>
   <div id="ui">
-    <div><b>3D Map + Roads</b></div>
+    <div><b>Google 3D + Road Polyline</b></div>
     <input id="address" placeholder="Enter an address..." />
-    <button id="go">Load 3D</button>
-    <div id="status"></div>
+    <button id="go">Go</button>
+    <div id="status">Loading…</div>
   </div>
 
   <div id="cesiumContainer"></div>
 
   <script>
-    // This key must be allowed in the browser:
-    // Restrict by HTTP referrer + Map Tiles API only.
-    const TILE_KEY = "PUT_YOUR_BROWSER_TILE_KEY_HERE";
-    const TILESET_URL = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${TILE_KEY}`;
-
     const statusEl = document.getElementById("status");
-    function status(msg) { statusEl.textContent = msg; }
+    const setStatus = (m) => statusEl.textContent = m;
 
-    const viewer = new Cesium.Viewer("cesiumContainer", {
-      terrain: Cesium.Terrain.fromWorldTerrain(),
-    });
+    async function getConfig() {
+      const r = await fetch("/api/config");
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || "config failed");
+      return data;
+    }
 
-    let tileset;
+    // Basic polyline decoder (Google encoded polyline -> [lat,lng] points)
+    function decodePolyline(str) {
+      let index = 0, lat = 0, lng = 0;
+      const points = [];
+      while (index < str.length) {
+        let b, shift = 0, result = 0;
+        do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+        const dlat = (result & 1) ? ~(result >> 1) : (result >> 1);
+        lat += dlat;
+
+        shift = 0; result = 0;
+        do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+        const dlng = (result & 1) ? ~(result >> 1) : (result >> 1);
+        lng += dlng;
+
+        points.push([lat / 1e5, lng / 1e5]);
+      }
+      return points;
+    }
+
     (async () => {
-      tileset = await Cesium.Cesium3DTileset.fromUrl(TILESET_URL);
-      viewer.scene.primitives.add(tileset);
-      status("Tileset loaded. Enter an address.");
+      try {
+        const cfg = await getConfig();
+        const tilesetUrl = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${encodeURIComponent(cfg.tileKey)}`;
+
+        const viewer = new Cesium.Viewer("cesiumContainer", {
+          // Keep defaults; Cesium shows credits UI which is important for attribution
+        });
+
+        setStatus("Loading 3D tiles…");
+        const tileset = await Cesium.Cesium3DTileset.fromUrl(tilesetUrl);
+        viewer.scene.primitives.add(tileset);
+
+        setStatus("3D loaded. Enter an address and press Go.");
+
+        document.getElementById("go").onclick = async () => {
+          const address = document.getElementById("address").value.trim();
+          if (!address) return setStatus("Type an address first.");
+
+          setStatus("Geocoding…");
+          const geo = await fetch(`/api/geocode?address=${encodeURIComponent(address)}`).then(r => r.json());
+          if (!geo.ok) return setStatus("Geocode failed:\n" + (geo.error || JSON.stringify(geo)));
+
+          const { lat, lng, formatted } = geo;
+          setStatus(`Flying to:\n${formatted}\n(${lat.toFixed(6)}, ${lng.toFixed(6)})`);
+
+          viewer.camera.flyTo({
+            destination: Cesium.Cartesian3.fromDegrees(lng, lat, 1200),
+            orientation: { pitch: Cesium.Math.toRadians(-35) }
+          });
+
+          // OPTIONAL demo route: from this point to a nearby offset point
+          setStatus("Fetching route polyline…");
+          const route = await fetch(`/api/route?oLat=${lat}&oLng=${lng}&dLat=${lat+0.01}&dLng=${lng+0.01}`).then(r => r.json());
+          if (!route.ok) return setStatus("Route failed:\n" + (route.error || JSON.stringify(route)));
+
+          // Draw polyline on the map
+          const pts = decodePolyline(route.encodedPolyline);
+          viewer.entities.removeAll();
+
+          viewer.entities.add({
+            polyline: {
+              positions: pts.map(([la, lo]) => Cesium.Cartesian3.fromDegrees(lo, la, 5)),
+              width: 4
+            }
+          });
+
+          setStatus("Done. Route drawn. (You can use these points for splines.)");
+        };
+      } catch (e) {
+        setStatus("Startup error:\n" + e.message);
+      }
     })();
-
-    document.getElementById("go").onclick = async () => {
-      const address = document.getElementById("address").value.trim();
-      if (!address) return status("Type an address first.");
-
-      status("Geocoding address...");
-      const geo = await fetch(`/api/geocode?address=${encodeURIComponent(address)}`).then(r => r.json());
-      if (!geo.ok) return status("Geocode failed:\n" + (geo.error || JSON.stringify(geo)));
-
-      const { lat, lng, formatted } = geo;
-      status(`Flying to:\n${formatted}\n(${lat.toFixed(6)}, ${lng.toFixed(6)})`);
-
-      viewer.camera.flyTo({
-        destination: Cesium.Cartesian3.fromDegrees(lng, lat, 1200),
-        orientation: { pitch: Cesium.Math.toRadians(-35) }
-      });
-
-      // OPTIONAL: get a road route polyline (demo)
-      // Change destination offset or add UI for a 2nd address.
-      status("Fetching a demo route polyline (optional)...");
-      const route = await fetch(`/api/route?oLat=${lat}&oLng=${lng}&dLat=${lat+0.01}&dLng=${lng+0.01}`).then(r => r.json());
-      if (!route.ok) return status("Route failed:\n" + (route.error || JSON.stringify(route)));
-
-      status("Got encoded polyline:\n" + route.encodedPolyline.slice(0, 120) + "...");
-      // If you want, next step is decoding + drawing it on the map.
-    };
   </script>
 </body>
 </html>
