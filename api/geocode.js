@@ -2,8 +2,8 @@ module.exports = async (req, res) => {
   const address = String(req.query.address || "").trim();
   if (!address) return res.status(400).json({ ok: false, error: "Missing address" });
 
-  const key = process.env.GOOGLE_SERVER_KEY;
-  if (!key) return res.status(500).json({ ok: false, error: "Missing GOOGLE_SERVER_KEY" });
+  const key = process.env.GOOGLE_KEY;
+  if (!key) return res.status(500).json({ ok: false, error: "Missing GOOGLE_KEY" });
 
   const url =
     "https://maps.googleapis.com/maps/api/geocode/json" +
@@ -14,11 +14,7 @@ module.exports = async (req, res) => {
   const data = await r.json();
 
   if (data.status !== "OK" || !data.results?.length) {
-    return res.status(400).json({
-      ok: false,
-      error: data.error_message || data.status || "Geocode failed",
-      raw: data
-    });
+    return res.status(400).json({ ok: false, error: data.error_message || data.status, raw: data });
   }
 
   const best = data.results[0];
